@@ -1,0 +1,71 @@
+{
+  "name": "HackRX 6.0 Document Processing API",
+  "description": "A FastAPI application for document processing and Q&A using OpenAI GPT-4o and Pinecone vector database",
+  "image": "heroku/python",
+  "stack": "heroku-22",
+  "keywords": ["fastapi", "ai", "document-processing", "nlp", "openai", "pinecone"],
+  "website": "https://github.com/PrathamPatil17/hackrx6.0",
+  "repository": "https://github.com/PrathamPatil17/hackrx6.0",
+  "env": {
+    "OPENAI_API_KEY": {
+      "description": "OpenAI API key for GPT-4o",
+      "required": true
+    },
+    "PINECONE_API_KEY": {
+      "description": "Pinecone API key for vector database",
+      "required": true
+    },
+    "PINECONE_INDEX": {
+      "description": "Pinecone index name",
+      "value": "hackathon-doc-index",
+      "required": true
+    },
+    "PINECONE_ENV": {
+      "description": "Pinecone environment",
+      "value": "us-east-1",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "PostgreSQL database connection string (Neon.tech or Heroku Postgres)",
+      "required": false
+    },
+    "POSTGRES_HOST": {
+      "description": "PostgreSQL host",
+      "required": false
+    },
+    "POSTGRES_PORT": {
+      "description": "PostgreSQL port",
+      "value": "5432",
+      "required": false
+    },
+    "POSTGRES_DB": {
+      "description": "PostgreSQL database name",
+      "required": false
+    },
+    "POSTGRES_USER": {
+      "description": "PostgreSQL username",
+      "required": false
+    },
+    "POSTGRES_PASSWORD": {
+      "description": "PostgreSQL password",
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "addons": [
+    {
+      "plan": "heroku-postgresql:essential-0",
+      "as": "DATABASE"
+    }
+  ],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}

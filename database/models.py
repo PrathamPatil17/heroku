@@ -94,8 +94,24 @@ class ProcessingStats(Base):
             "system_status": self.system_status
         }
 
-# Database engine and session
-engine = create_engine(DATABASE_URL, echo=False)
+# Database engine and session with SSL configuration
+engine_args = {
+    "echo": False,
+    "pool_pre_ping": True,  # Enable connection health checks
+    "pool_recycle": 300,    # Recycle connections every 5 minutes
+}
+
+# Add SSL configuration for PostgreSQL if using remote database
+if "localhost" not in DATABASE_URL and "127.0.0.1" not in DATABASE_URL:
+    engine_args["connect_args"] = {
+        "sslmode": "prefer",  # Prefer SSL but allow non-SSL
+        "sslcert": None,
+        "sslkey": None,
+        "sslrootcert": None,
+        "application_name": "hackrx_app"
+    }
+
+engine = create_engine(DATABASE_URL, **engine_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def create_tables():
@@ -118,12 +134,12 @@ def get_db_session():
         return None
 
 def test_connection():
-    """Test PostgreSQL connection"""
+    """Test PostgreSQL connection with enhanced error handling"""
     try:
         db = get_db_session()
         if db:
             # Test query with proper SQLAlchemy 2.0 syntax
-            result = db.execute(text("SELECT 1")).fetchone()
+            result = db.execute(text("SELECT 1 as test")).fetchone()
             db.close()
             print("✅ PostgreSQL connection successful")
             return True
@@ -131,7 +147,15 @@ def test_connection():
             print("❌ Failed to get database session")
             return False
     except Exception as e:
-        print(f"❌ PostgreSQL connection failed: {e}")
+        error_str = str(e).lower()
+        if "ssl connection" in error_str:
+            print(f"⚠️ PostgreSQL SSL connection issue: {e}")
+            print("💡 Tip: Check SSL configuration or use local PostgreSQL")
+        elif "textual sql expression" in error_str:
+            print(f"⚠️ PostgreSQL SQLAlchemy version issue: {e}")
+            print("💡 Database connection works but SQL syntax needs update")
+        else:
+            print(f"❌ PostgreSQL connection failed: {e}")
         return False
 
 if __name__ == "__main__":

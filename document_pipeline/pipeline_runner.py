@@ -343,27 +343,84 @@ class MaximumAccuracyPipelineRunner:
 maximum_accuracy_pipeline = MaximumAccuracyPipelineRunner()
 
 def run_pipeline(pdf_path: str, doc_id: Optional[str] = None, 
-                pipeline_version: str = "v3.0_NO_CACHE") -> List[DocumentChunk]:
+                pipeline_version: str = "v3.0_NO_CACHE", mode: str = "accuracy") -> List[DocumentChunk]:
     """
-    NO-CACHE pipeline function for maximum accuracy - always generates fresh embeddings.
+    Document processing pipeline with speed/accuracy modes.
+    
+    Args:
+        mode: "speed" for fastest processing, "accuracy" for maximum accuracy
     """
     try:
-        logger.info(f"🚀 Starting MAXIMUM ACCURACY NO-CACHE pipeline")
-        result = maximum_accuracy_pipeline.run_maximum_accuracy_pipeline(
-            pdf_path, doc_id, pipeline_version
-        )
-        
-        if result['success']:
-            logger.info(f"✅ Maximum accuracy pipeline completed successfully (NO CACHE)")
-            return result['chunks']
+        if mode == "speed":
+            logger.info(f"🚀 Starting SPEED-OPTIMIZED pipeline")
+            return _run_speed_optimized_pipeline(pdf_path, doc_id, pipeline_version)
         else:
-            logger.error(f"❌ Maximum accuracy pipeline failed: {result.get('error', 'Unknown error')}")
-            # Fallback to original pipeline
-            return _run_original_pipeline_fallback(pdf_path, doc_id, pipeline_version)
+            logger.info(f"🚀 Starting MAXIMUM ACCURACY NO-CACHE pipeline")
+            result = maximum_accuracy_pipeline.run_maximum_accuracy_pipeline(
+                pdf_path, doc_id, pipeline_version
+            )
+            
+            if result['success']:
+                logger.info(f"✅ Maximum accuracy pipeline completed successfully (NO CACHE)")
+                return result['chunks']
+            else:
+                logger.error(f"❌ Maximum accuracy pipeline failed: {result.get('error', 'Unknown error')}")
+                # Fallback to original pipeline
+                return _run_original_pipeline_fallback(pdf_path, doc_id, pipeline_version)
             
     except Exception as e:
         logger.error(f"Pipeline execution failed: {e}")
         return _run_original_pipeline_fallback(pdf_path, doc_id, pipeline_version)
+
+def _run_speed_optimized_pipeline(pdf_path: str, doc_id: Optional[str] = None,
+                                 pipeline_version: str = "v1.0_SPEED") -> List[DocumentChunk]:
+    """Speed-optimized pipeline with minimal processing."""
+    try:
+        logger.info("🏃‍♂️ Running speed-optimized pipeline")
+        
+        # Fast text extraction
+        pages = extract_text_from_pdf(pdf_path)
+        if not pages:
+            raise ValueError("No text extracted from PDF")
+
+        # Minimal cleaning for speed
+        full_text = "\n".join(pages)
+        
+        # Fast chunking with larger chunks (fewer chunks to process)
+        chunks = recursive_split(full_text, 
+                               chunk_size=1000,  # Larger chunks
+                               chunk_overlap=100,  # Less overlap
+                               separators=["\n\n", "\n", ". ", " "])
+        
+        # Create document chunks with minimal metadata
+        document_chunks = []
+        for i, chunk_text in enumerate(chunks):
+            if len(chunk_text.strip()) < 20:  # Skip very short chunks
+                continue
+                
+            chunk = DocumentChunk(
+                id=f"{doc_id}_{i}" if doc_id else f"chunk_{i}",
+                content=chunk_text.strip(),
+                metadata={
+                    'doc_id': doc_id,
+                    'chunk_index': i,
+                    'pipeline': 'speed_optimized',
+                    'chunk_size': len(chunk_text)
+                }
+            )
+            document_chunks.append(chunk)
+        
+        # Fast embedding and storage (reduced batch size for speed)
+        if document_chunks:
+            embed_chunks(document_chunks[:20])  # Limit to first 20 chunks for speed
+            upsert_chunks(document_chunks[:20])
+        
+        logger.info(f"✅ Speed pipeline completed: {len(document_chunks[:20])} chunks")
+        return document_chunks[:20]
+        
+    except Exception as e:
+        logger.error(f"Speed pipeline failed: {e}")
+        raise
 
 def _run_original_pipeline_fallback(pdf_path: str, doc_id: Optional[str] = None,
                                   pipeline_version: str = "v1.0") -> List[DocumentChunk]:

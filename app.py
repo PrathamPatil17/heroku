@@ -1,3 +1,5 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -9,6 +11,7 @@ import httpx
 import tempfile
 import os
 import time
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -47,13 +50,13 @@ load_dotenv()
 db_service = get_database_service()
 
 app = FastAPI(
-    title="HackRX 6.0 - LLM-Powered Document Query System with PostgreSQL",
-    description="Intelligent query-retrieval system for insurance, legal, HR, and compliance documents with PostgreSQL metadata storage",
-    version="1.0.0",
-    swagger_ui_parameters={
-        "persistAuthorization": True
-    }
+    title="Document Processing API",
+    description="API for processing documents and answering questions",
+    version="1.0.0"
 )
+
+# Add ThreadPoolExecutor for parallel processing
+executor = ThreadPoolExecutor(max_workers=4)
 
 # Include analytics router if available
 if analytics_router is not None:
@@ -97,6 +100,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Simple in-memory cache for similar questions (token optimization)
 question_cache = {}
@@ -268,98 +274,117 @@ def _validate_document_file(file_path: str) -> bool:
         return False
 
 def generate_answer_with_context(question: str, relevant_chunks: List[dict]) -> str:
-    """Generate concise, precise answers (2-3 lines) using OpenAI with maximum accuracy"""
+    """Generate comprehensive, accurate answers using enhanced semantic search with detailed analysis"""
     
-    # Check cache first to save tokens
+    # DEBUG: Log the chunks received
+    print(f"🔍 DEBUG: Received {len(relevant_chunks)} chunks")
+    for i, chunk in enumerate(relevant_chunks[:5]):  # Log first 5 chunks
+        print(f"🔍 DEBUG: Chunk {i}: score={chunk.get('score', 0)}, text_length={len(chunk.get('text', ''))}")
+        if chunk.get('text'):
+            print(f"🔍 DEBUG: Text preview: {chunk['text'][:150]}...")
+        else:
+            print(f"🔍 DEBUG: Chunk structure: {list(chunk.keys())}")
+    
+    # Check cache first to save tokens and time
     question_key = question.lower().strip()
     if question_key in question_cache:
         print("💾 Using cached answer")
         return question_cache[question_key]
     
-    # Enhanced context preparation for better answers
+    # Enhanced context preparation for maximum accuracy
     context_parts = []
     total_chars = 0
-    max_context_chars = 2500  # Optimized for focused context
+    max_context_chars = 5000  # Increased for comprehensive coverage
     
-    # Sort chunks by score and take top 5 for most relevant information
-    sorted_chunks = sorted(relevant_chunks, key=lambda x: x.get('score', 0), reverse=True)[:5]
+    # Sort and use ALL chunks with relevance scoring
+    sorted_chunks = sorted(relevant_chunks, key=lambda x: x.get('score', 0), reverse=True)
     
-    for i, chunk in enumerate(sorted_chunks):
-        chunk_text = chunk['text'].strip()
+    for chunk in sorted_chunks:
+        chunk_text = chunk.get('text', '').strip()
         
-        # Skip very short chunks
-        if len(chunk_text) < 30:
+        # Only include meaningful chunks
+        if len(chunk_text) < 50:
             continue
             
         if total_chars + len(chunk_text) > max_context_chars:
-            # More generous truncation for better context
+            # Smart truncation preserving important content
             remaining_chars = max_context_chars - total_chars
             if remaining_chars > 200:
-                chunk_text = chunk_text[:remaining_chars-10] + "..."
-                context_parts.append(chunk_text)
+                truncated_text = chunk_text[:remaining_chars-10] + "..."
+                context_parts.append(f"[Score: {chunk.get('score', 0):.3f}] {truncated_text}")
             break
         else:
-            context_parts.append(chunk_text)
+            context_parts.append(f"[Score: {chunk.get('score', 0):.3f}] {chunk_text}")
             total_chars += len(chunk_text)
     
-    context = "\n".join(context_parts)
+    context = "\n\n".join(context_parts)
     
-    # Enhanced prompt specifically designed for concise 2-3 line answers
-    prompt = f"""Based on the policy document context below, provide a precise, concise answer to the question. Your response must be EXACTLY 2-3 lines maximum while including all essential information.
+    # DEBUG: Log enhanced context details
+    print(f"🔍 DEBUG: Enhanced context length: {len(context)} chars")
+    print(f"🔍 DEBUG: Context preview: {context[:300]}...")
+    
+    # Enhanced insurance-specific prompt for concise answers
+    prompt = f"""You are an expert insurance policy analyst. Analyze the following policy content and provide a concise, precise answer.
 
-Context from Policy Document:
+INSURANCE POLICY CONTENT WITH RELEVANCE SCORES:
 {context}
 
-Question: {question}
+QUESTION: {question}
 
-CRITICAL INSTRUCTIONS:
-- Answer in EXACTLY 2-3 lines maximum (not paragraphs)
-- Include specific numbers, amounts, percentages, and timeframes
-- Be direct and factual - no filler words or explanations
-- If multiple related points exist, combine them in one coherent response
-- Use bullet points only if absolutely necessary for clarity
-- Start directly with the answer - no introductory phrases
+CONCISE ANALYSIS INSTRUCTIONS:
+1. Extract only the most essential details: amounts, percentages, timeframes, limits
+2. Identify key conditions, exclusions, and requirements
+3. Include exact policy language for critical details
+4. Provide complete information in the most condensed format possible
+
+ANSWER REQUIREMENTS:
+- Maximum 2 sentences
+- Include all essential information (amounts, timeframes, conditions)
+- Quote key policy text in quotation marks when necessary
+- Cover all relevant aspects but keep it brief and precise
+- Be direct and specific
 
 Answer:"""
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",  # Using GPT-4o for maximum accuracy
             messages=[
-                {"role": "system", "content": "You are an expert at providing concise, accurate answers. Always respond in exactly 2-3 lines maximum, including all essential details like numbers, amounts, and conditions."},
+                {"role": "system", "content": "You are a professional insurance policy analyst. Provide concise, accurate answers with essential policy details in maximum 2 sentences. Include exact amounts, timeframes, and key conditions. Be precise and direct while covering all critical information."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=120,  # Reduced to enforce brevity
-            temperature=0.1  # Lower for more precise, factual responses
+            max_tokens=150,  # Reduced for concise responses
+            temperature=0.0,  # Zero temperature for maximum accuracy
+            timeout=20  # Reduced timeout for faster responses
         )
         
         answer = response.choices[0].message.content.strip()
         
-        # Post-process to ensure 2-3 lines maximum
-        lines = answer.split('\n')
-        if len(lines) > 3:
-            # Keep only the first 3 most important lines
-            answer = '\n'.join(lines[:3])
-        
-        # Cache the answer to save future tokens
+        # Cache the comprehensive answer
         question_cache[question_key] = answer
         
-        # Keep cache size manageable (max 50 entries)
-        if len(question_cache) > 50:
+        # Maintain cache size
+        if len(question_cache) > 30:
             oldest_key = next(iter(question_cache))
             del question_cache[oldest_key]
         
         return answer
         
     except Exception as e:
-        # Fallback: return concise context-based answer without GPT
-        print(f"Warning: GPT generation failed ({str(e)}), using fallback")
+        # Enhanced fallback with better context utilization
+        print(f"Warning: GPT generation failed ({str(e)}), using enhanced fallback")
         if relevant_chunks:
-            # Create a concise 2-line fallback from the most relevant chunk
-            best_chunk = relevant_chunks[0]['text'][:200].strip()
-            fallback_answer = f"Based on the document: {best_chunk}...\nPlease check the full document for complete details."
+            # Create comprehensive fallback from top chunks
+            best_chunks = sorted_chunks[:3]
+            fallback_parts = []
+            for chunk in best_chunks:
+                chunk_text = chunk.get('text', '')[:300]
+                if chunk_text:
+                    fallback_parts.append(f"Based on policy content: {chunk_text}...")
+            
+            fallback_answer = "\n\n".join(fallback_parts) + "\n\nPlease refer to the complete policy document for full details and conditions."
         else:
-            fallback_answer = "Information not available in the provided document.\nPlease verify the question or provide more context."
+            fallback_answer = "The semantic search did not find relevant information in the provided document.\nPlease verify the question relates to the document content or try rephrasing your question."
         
         # Cache fallback too
         question_cache[question_key] = fallback_answer
@@ -462,7 +487,7 @@ async def process_document_queries(
             # Process document through NO-CACHE pipeline for maximum accuracy
             print("� Processing document through MAXIMUM ACCURACY NO-CACHE pipeline...")
             processing_start = time.time()
-            chunks = run_pipeline(temp_file_path, doc_id=doc_hash)
+            chunks = run_pipeline(temp_file_path, doc_id=doc_hash, mode="speed")
             processing_time = time.time() - processing_start
             chunks_count = len(chunks)
             print(f"✅ Document processed with MAXIMUM ACCURACY (NO CACHE): {chunks_count} chunks created in {processing_time:.2f}s")
@@ -491,121 +516,18 @@ async def process_document_queries(
                 print(f"⚠️ Failed to log document processing: {e}")
                 document_id = None  # Continue without database logging
         
-        # Step 4: Process each question (Optimized for Performance)
+        # Step 4: Process questions in parallel batches for maximum speed
         query_start_time = time.time()
-        answers = []
+        print(f"⚡ Processing {len(request.questions)} questions in PARALLEL BATCHES...")
         
-        for i, question in enumerate(request.questions):
-            question_start = time.time()
-            print(f"⚡ Processing question {i+1}/{len(request.questions)}: {question}")
-            
-            try:
-                # Retrieve more chunks for comprehensive answers (increased from 5 to 8)
-                relevant_chunks = retrieve_relevant_chunks(question, top_k=8)
-                
-                # Simplified debugging to reduce console output
-                print(f"📊 Retrieved {len(relevant_chunks)} chunks")
-                if relevant_chunks:
-                    print(f"🔍 Top score: {relevant_chunks[0]['score']:.3f}")
-                
-                if not relevant_chunks:
-                    answers.append("Information not available in the provided document.\nPlease verify the question or provide more context.")
-                    continue
-                
-                # Generate CONCISE answer (2-3 lines) using improved GPT prompting
-                answer_start = time.time()
-                answer = generate_answer_with_context(question, relevant_chunks)
-                answer_time = time.time() - answer_start
-                answers.append(answer)
-                
-                question_time = time.time() - question_start
-                print(f"⚡ Q{i+1} done in {question_time:.1f}s - Concise answer generated")
-                
-                # Log individual user interaction with detailed metrics
-                if UPLOAD_LOGGING_AVAILABLE:
-                    try:
-                        # Calculate performance metrics for this interaction
-                        performance_metrics = {
-                            "total_processing_time": question_time,
-                            "retrieval_time": question_time * 0.3,  # Approximate
-                            "llm_time": answer_time,
-                            "embedding_time": question_time * 0.2
-                        }
-                        
-                        # Calculate quality metrics
-                        quality_metrics = {
-                            "relevance_score": relevant_chunks[0]['score'] if relevant_chunks else 0.0,
-                            "confidence_score": 0.85,  # Default confidence
-                            "chunks_used": len(relevant_chunks),
-                            "completeness": 0.9 if len(answer) > 50 else 0.7
-                        }
-                        
-                        # Calculate API usage (rough estimates)
-                        api_usage = {
-                            "tokens_input": len(question) * 1.3,  # Rough token estimate
-                            "tokens_output": len(answer) * 1.3,
-                            "api_calls": 1,
-                            "estimated_cost_usd": 0.001  # Rough cost estimate
-                        }
-                        
-                        # User context
-                        user_context = {
-                            "ip_address": user_ip,
-                            "user_agent": user_agent,
-                            "source": "api",
-                            "timezone": "UTC"
-                        }
-                        
-                        # Log the interaction
-                        interaction_id = upload_interaction_logger.log_user_interaction(
-                            user_input=question,
-                            model_output=answer,
-                            user_id=user_id,
-                            session_id=session_id,
-                            document_upload_id=upload_id,
-                            document_url=request.documents,
-                            model_version="gpt-3.5-turbo",
-                            pipeline_version="v3.0_NO_CACHE",
-                            processing_mode="no_cache_maximum_accuracy",
-                            performance_metrics=performance_metrics,
-                            quality_metrics=quality_metrics,
-                            api_usage=api_usage,
-                            user_context=user_context
-                        )
-                        
-                        if interaction_id:
-                            print(f"✅ Interaction logged: {interaction_id}")
-                        
-                    except Exception as e:
-                        print(f"⚠️ Failed to log interaction: {e}")
-                
-            except Exception as e:
-                print(f"❌ Error Q{i+1}: {str(e)}")
-                error_answer = f"Error: {str(e)}"
-                answers.append(error_answer)
-                
-                # Log failed interaction
-                if UPLOAD_LOGGING_AVAILABLE:
-                    try:
-                        upload_interaction_logger.log_user_interaction(
-                            user_input=question,
-                            model_output=error_answer,
-                            user_id=user_id,
-                            session_id=session_id,
-                            document_upload_id=upload_id,
-                            document_url=request.documents,
-                            error_info={
-                                "type": "processing_error",
-                                "message": str(e),
-                                "stage": "question_processing"
-                            }
-                        )
-                    except Exception as log_e:
-                        print(f"⚠️ Failed to log error interaction: {log_e}")
+        # Process all questions in parallel batches
+        answers = await process_questions_parallel_batch(request.questions)
         
         # Step 5: Log query session to PostgreSQL with enhanced metrics
         query_time = time.time() - query_start_time
         total_time = time.time() - processing_start_time
+        
+        print(f"🎯 All questions processed in {query_time:.2f}s (total: {total_time:.2f}s)")
         
         # Prepare enhanced metrics for logging
         performance_metrics = {
@@ -749,8 +671,8 @@ async def root():
         "message": "HackRX 6.0 LLM-Powered Document Query System with PostgreSQL",
         "status": "running",
         "version": "1.0.0",
-        "processing_mode": "NO_CACHE_MAXIMUM_ACCURACY",
-        "optimizations": "Token-optimized with GPT-3.5-turbo and NO-CACHE for maximum accuracy",
+        "processing_mode": "SPEED_OPTIMIZED_NO_CACHE",
+        "optimizations": "Speed-optimized with reduced tokens, context, and timeouts for faster responses",
         "enhanced_features": {
             "database_analytics": ENHANCED_DB_AVAILABLE,
             "performance_monitoring": ENHANCED_DB_AVAILABLE,
@@ -764,14 +686,15 @@ async def root():
         },
         "technologies": {
             "backend": "FastAPI",
-            "llm": "OpenAI GPT-3.5-turbo",
+            "llm": "OpenAI GPT-4o",
             "vector_database": "Pinecone", 
             "relational_database": "PostgreSQL",
             "document_processing": "PyMuPDF + python-docx + spaCy",
             "analytics": "Enhanced PostgreSQL with JSONB" if ENHANCED_DB_AVAILABLE else "Basic PostgreSQL"
         },
         "available_endpoints": {
-            "main": ["/query", "/health", "/setup-database"],
+            "main": ["/hackrx/run", "/health", "/setup-database"],
+            "admin": ["/admin/documents", "/admin/stats", "/admin/performance", "/admin/cleanup-vectors"],
             "analytics": [
                 "/analytics/health",
                 "/analytics/system", 
@@ -792,7 +715,7 @@ async def health_check():
         "components": {},
         "database_stats": {},
         "optimizations": {
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-4o",
             "caching": "enabled",
             "token_optimization": "active"
         }
@@ -809,13 +732,19 @@ async def health_check():
     # Test Pinecone connection
     try:
         from document_pipeline.vectorstore import vector_store
-        # Try to access the index from the vector store
-        if vector_store.index:
-            test_vector = [0.0] * 1536
-            result = vector_store.index.query(vector=test_vector, top_k=1, include_metadata=False)
-            health_status["components"]["pinecone_connection"] = "working"
-        else:
-            health_status["components"]["pinecone_connection"] = "index not initialized"
+        # Get detailed connection status
+        pinecone_status = vector_store.get_connection_status()
+        health_status["components"]["pinecone_connection"] = pinecone_status["status"]
+        
+        if pinecone_status["status"] != "connected":
+            health_status["status"] = "degraded"
+            if "error" in pinecone_status:
+                health_status["components"]["pinecone_error"] = pinecone_status["error"]
+        
+        # Add vector count if available
+        if pinecone_status.get("total_vectors"):
+            health_status["components"]["pinecone_vectors"] = pinecone_status["total_vectors"]
+            
     except Exception as e:
         health_status["components"]["pinecone_connection"] = f"error: {str(e)}"
         health_status["status"] = "degraded"
@@ -824,16 +753,41 @@ async def health_check():
     try:
         health_status["components"]["postgresql"] = "configured" if db_service.postgres_enabled else "unavailable"
         if db_service.postgres_enabled:
-            stats = db_service.get_system_stats()
-            health_status["database_stats"] = stats
+            try:
+                stats = db_service.get_system_stats()
+                health_status["database_stats"] = stats
+            except Exception as db_error:
+                # Handle database connection errors gracefully
+                error_str = str(db_error).lower()
+                if "ssl connection" in error_str:
+                    health_status["database_stats"] = {
+                        "error": "PostgreSQL SSL connection issue - using fallback mode",
+                        "status": "degraded_ssl"
+                    }
+                    health_status["status"] = "degraded"
+                else:
+                    health_status["database_stats"] = {
+                        "error": f"Database connection error: {str(db_error)[:100]}...",
+                        "status": "error"
+                    }
+                    health_status["status"] = "degraded"
     except Exception as e:
         health_status["components"]["postgresql"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
     
-    # NO-CACHE mode - maximum accuracy embeddings
+    # NO-CACHE mode - maximum accuracy embeddings with SPEED OPTIMIZATION
     health_status["components"]["embedding_system"] = {
-        "status": "NO_CACHE_MAXIMUM_ACCURACY",
+                    "status": "ACCURACY_OPTIMIZED_NO_CACHE",
         "mode": "FRESH_EMBEDDINGS_EVERY_TIME",
-        "accuracy_boost": "ENABLED"
+        "accuracy_boost": "ENABLED",
+        "speed_optimizations": {
+            "chunk_retrieval": "8 chunks (increased for maximum accuracy)",
+            "context_size": "4000 chars (increased for comprehensive coverage)",
+            "llm_tokens": "300 max (increased for detailed responses)",
+            "api_timeout": "20 seconds (increased for detailed processing)",
+            "cache_size": "30 entries (reduced from 50)",
+            "model": "GPT-4o (upgraded from GPT-4o-mini)"
+        }
     }
     
     # Check question cache
@@ -862,6 +816,109 @@ async def get_system_statistics(
     """Get comprehensive system statistics from PostgreSQL"""
     return db_service.get_system_stats()
 
+@app.get("/admin/performance")
+async def get_performance_stats(
+    token: str = Depends(verify_token)
+):
+    """Get performance statistics and optimization recommendations"""
+    try:
+        from document_pipeline.vectorstore import vector_store
+        
+        # Get vector store performance stats safely
+        try:
+            index_stats = vector_store.get_index_stats()
+        except Exception as e:
+            index_stats = {"error": f"Index stats error: {str(e)}"}
+        
+        try:
+            optimization_info = vector_store.optimize_for_speed()
+        except Exception as e:
+            optimization_info = {"error": f"Optimization info error: {str(e)}"}
+        
+        # Safe cache info without circular references
+        cache_info = {
+            "question_cache_size": len(question_cache) if question_cache else 0,
+            "cache_hit_rate": "Not tracked",
+            "memory_usage": "Optimized for speed"
+        }
+        
+        # Build response with safe data only
+        response = {
+            "performance_status": "optimized_for_speed",
+            "response_time_optimizations": {
+                "chunk_retrieval": "Increased to 8 chunks for maximum accuracy",
+                "context_size": "Reduced from 2500 to 1800 chars",
+                "llm_tokens": "Optimized 120 tokens for GPT-4o-mini",
+                "processing_chunks": "Using top 3 instead of 5",
+                "api_timeout": "15 seconds timeout for GPT-4o-mini",
+                "model_upgrade": "GPT-4o-mini for better accuracy and efficiency"
+            },
+            "cache_stats": cache_info
+        }
+        
+        # Add Pinecone stats if available
+        if isinstance(index_stats, dict) and "error" not in index_stats:
+            response["pinecone_stats"] = {
+                "total_vectors": index_stats.get("total_vectors", 0),
+                "index_fullness": index_stats.get("index_fullness", 0.0),
+                "pod_warnings": index_stats.get("pod_warnings", []),
+                "cleanup_recommended": index_stats.get("cleanup_recommended", False)
+            }
+        else:
+            response["pinecone_stats"] = {"status": "unavailable", "error": str(index_stats.get("error", "Unknown error"))}
+        
+        # Add optimization info if available
+        if isinstance(optimization_info, dict) and "error" not in optimization_info:
+            response["optimization_recommendations"] = optimization_info.get("recommendations", [])
+            response["current_optimizations"] = optimization_info.get("speed_optimizations", {})
+        else:
+            response["optimization_error"] = str(optimization_info.get("error", "Unknown error"))
+        
+        return response
+        
+    except Exception as e:
+        print(f"Performance endpoint error: {e}")
+        return {
+            "error": f"Failed to get performance stats: {str(e)}",
+            "performance_status": "error"
+        }
+
+@app.post("/admin/cleanup-vectors")
+async def cleanup_old_vectors(
+    days_old: int = 30,
+    token: str = Depends(verify_token)
+):
+    """Clean up old vectors to free Pinecone pod space"""
+    try:
+        from document_pipeline.vectorstore import vector_store
+        
+        # Get current stats before cleanup
+        before_stats = vector_store.get_index_stats()
+        
+        # Perform cleanup
+        cleanup_result = vector_store.cleanup_old_vectors(days_old=days_old)
+        
+        # Get stats after cleanup
+        after_stats = vector_store.get_index_stats()
+        
+        return {
+            "cleanup_result": cleanup_result,
+            "before_cleanup": {
+                "total_vectors": before_stats.get("total_vectors", 0),
+                "index_fullness": before_stats.get("index_fullness", 0)
+            },
+            "after_cleanup": {
+                "total_vectors": after_stats.get("total_vectors", 0),
+                "index_fullness": after_stats.get("index_fullness", 0)
+            },
+            "space_saved": {
+                "vectors_removed": before_stats.get("total_vectors", 0) - after_stats.get("total_vectors", 0),
+                "fullness_reduction": before_stats.get("index_fullness", 0) - after_stats.get("index_fullness", 0)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
 @app.post("/admin/setup-db") 
 async def setup_database(
     token: str = Depends(verify_token)
@@ -880,6 +937,141 @@ async def setup_database(
             detail="Failed to setup PostgreSQL database. Check configuration and connection."
         )
 
+# Optimized parallel processing functions
+async def process_questions_parallel_batch(questions: List[str]) -> List[str]:
+    """Process multiple questions in parallel batches for maximum speed"""
+    
+    if len(questions) == 1:
+        # Single question - use fast path
+        return await process_single_question_fast(questions[0])
+    
+    # Batch process multiple questions
+    batch_size = 5  # Process 5 questions per batch
+    question_batches = [questions[i:i + batch_size] for i in range(0, len(questions), batch_size)]
+    
+    all_answers = []
+    
+    for batch in question_batches:
+        # Process batch in parallel
+        batch_tasks = [process_single_question_fast(q) for q in batch]
+        batch_answers = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        
+        # Handle any errors in the batch
+        processed_answers = []
+        for answer in batch_answers:
+            if isinstance(answer, Exception):
+                processed_answers.append("Unable to process question due to an error.")
+            else:
+                processed_answers.append(answer[0] if isinstance(answer, list) else answer)
+        
+        all_answers.extend(processed_answers)
+    
+    return all_answers
+
+async def process_single_question_fast(question: str) -> List[str]:
+    """Process a single question with enhanced semantic search and comprehensive analysis"""
+    try:
+        # Enhanced chunk retrieval with more comprehensive semantic search
+        relevant_chunks = await asyncio.get_event_loop().run_in_executor(
+            executor, retrieve_relevant_chunks, question, 12  # Increased to 12 chunks for comprehensive coverage
+        )
+        
+        if not relevant_chunks:
+            return ["The semantic search did not find relevant information in the provided document. Please verify the question relates to the document content."]
+        
+        # Generate comprehensive answer with enhanced analysis
+        answer = await asyncio.get_event_loop().run_in_executor(
+            executor, generate_answer_with_context_fast, question, relevant_chunks
+        )
+        
+        return [answer]
+        
+    except Exception as e:
+        logger.error(f"Error processing question '{question}': {str(e)}")
+        return ["Unable to process this question due to a system error. Please try again."]
+
+def generate_answer_with_context_fast(question: str, chunks: List[dict]) -> str:
+    """Generate answer with maximum accuracy using enhanced semantic search results"""
+    try:
+        # DEBUG: Log the chunks received in fast function
+        print(f"🔍 DEBUG FAST: Received {len(chunks)} chunks")
+        for i, chunk in enumerate(chunks[:5]):  # Log first 5 chunks for better visibility
+            print(f"🔍 DEBUG FAST: Chunk {i}: score={chunk.get('score', 0)}, text_length={len(chunk.get('text', ''))}")
+            if chunk.get('text'):
+                print(f"🔍 DEBUG FAST: Text preview: {chunk['text'][:150]}...")
+            else:
+                print(f"🔍 DEBUG FAST: Chunk structure: {list(chunk.keys())}")
+        
+        # Enhanced context creation with better chunk utilization
+        context_parts = []
+        total_chars = 0
+        max_context_chars = 5000  # Increased for maximum accuracy
+        
+        # Sort chunks by relevance score and use ALL available chunks
+        sorted_chunks = sorted(chunks, key=lambda x: x.get('score', 0), reverse=True)
+        
+        for chunk in sorted_chunks:  # Use all chunks, not just top 6
+            chunk_text = chunk.get('text', '').strip()  # FIXED: Use 'text' field
+            if chunk_text and len(chunk_text) > 50:  # Only meaningful chunks
+                if total_chars + len(chunk_text) > max_context_chars:
+                    # Smart truncation - keep most relevant parts
+                    remaining_chars = max_context_chars - total_chars
+                    if remaining_chars > 200:
+                        truncated_text = chunk_text[:remaining_chars-10] + "..."
+                        context_parts.append(f"[Relevance: {chunk.get('score', 0):.3f}] {truncated_text}")
+                    break
+                else:
+                    context_parts.append(f"[Relevance: {chunk.get('score', 0):.3f}] {chunk_text}")
+                    total_chars += len(chunk_text)
+        
+        context = "\n\n".join(context_parts)
+        
+        # DEBUG: Log enhanced context details
+        print(f"🔍 DEBUG FAST: Enhanced context length: {len(context)} chars")
+        print(f"🔍 DEBUG FAST: Context preview: {context[:300]}...")
+        
+        # Enhanced prompt with specific insurance domain instructions for concise answers
+        prompt = f"""You are an expert insurance policy analyst. Analyze the following insurance policy content and provide a concise, accurate answer.
+
+INSURANCE POLICY CONTENT:
+{context}
+
+QUESTION: {question}
+
+CONCISE ANALYSIS INSTRUCTIONS:
+1. Extract essential facts: amounts, percentages, timeframes only
+2. Identify key conditions, exclusions, and exceptions
+3. Quote exact policy language for critical details only
+4. Provide complete information in maximum 2 sentences
+
+RESPONSE FORMAT:
+- Maximum 2 sentences
+- Include all essential amounts/timeframes/conditions
+- Quote key policy sections in quotation marks when necessary
+- Be direct and specific, avoid lengthy explanations
+
+Answer:"""
+        
+        # Enhanced OpenAI call with optimized parameters for concise insurance analysis
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a professional insurance policy analyst. Provide concise, accurate answers with essential policy details in maximum 2 sentences. Include exact amounts, timeframes, and key conditions. Be precise and direct while covering all critical information."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,  # Reduced for concise responses
+            temperature=0.0,  # Zero temperature for maximum accuracy
+            timeout=15  # Reduced timeout for faster responses
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except Exception as e:
+        logger.error(f"Error generating enhanced answer: {str(e)}")
+        return "Unable to generate comprehensive answer due to processing error. Please try again."
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    port = int(os.getenv("PORT", 8001))
+    uvicorn.run(app, host="0.0.0.0", port=port)

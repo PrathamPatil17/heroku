@@ -299,17 +299,64 @@ The system returns structured answers based on document analysis:
 ✅ **Caching System** - Embedding cache for performance
 ✅ **Testing Suite** - Comprehensive API testing
 ✅ **Documentation** - Complete setup and usage guides
+✅ **Heroku Deployment** - Ready for cloud deployment
 
 The system is now **fully functional** and ready for the HackRX 6.0 hackathon submission!
+
+## 🚀 Heroku Deployment
+
+This application is configured for easy deployment to Heroku. See [HEROKU_DEPLOYMENT.md](HEROKU_DEPLOYMENT.md) for complete deployment instructions.
+
+### Quick Deploy to Heroku
+
+1. **Prerequisites**: Heroku account, Heroku CLI, OpenAI API key, Pinecone API key
+
+2. **One-Click Deploy** (if repo is public):
+   [![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
+
+3. **Manual Deploy**:
+
+   ```bash
+   heroku login
+   heroku create your-app-name
+   heroku addons:create heroku-postgresql:essential-0
+   heroku config:set OPENAI_API_KEY="your_key"
+   heroku config:set PINECONE_API_KEY="your_key"
+   heroku config:set PINECONE_INDEX="hackathon-doc-index"
+   git push heroku main
+   ```
+
+4. **Test Deployment**:
+   ```bash
+   python test_heroku_deployment.py your-app-name
+   ```
+
+### Environment Variables for Heroku
+
+- `OPENAI_API_KEY` (required)
+- `PINECONE_API_KEY` (required)
+- `PINECONE_INDEX` (required)
+- `PINECONE_ENV` (required)
+- `DATABASE_URL` (auto-configured by Heroku Postgres)
 
 ## 🏆 Next Steps (Optional Enhancements)
 
 - Add support for DOCX and email formats
 - Implement PostgreSQL for metadata storage
 - Add web interface for easier testing
-- Deploy to cloud platforms (AWS, Azure, GCP)
 - Add monitoring and analytics
 - Implement user session management
+
+## 📊 Heroku Deployment Features
+
+- **Auto-scaling**: Configured for Heroku dynos
+- **PostgreSQL**: Integrated with Heroku Postgres
+- **Health checks**: Built-in monitoring endpoints
+- **Logging**: Structured logging for debugging
+- **Security**: Environment-based configuration
+
 # hackathon
+
 # aivengers
+
 # hackrx6.0

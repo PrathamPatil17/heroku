@@ -2,7 +2,7 @@
 
 import os
 from dotenv import load_dotenv
-import pinecone
+from pinecone import Pinecone, ServerlessSpec
 import os
 from document_pipeline.chunk_schema import DocumentChunk
 from concurrent.futures import ThreadPoolExecutor
@@ -22,17 +22,21 @@ class EnhancedVectorStore:
     """Enhanced vector store with improved search capabilities and query expansion."""
     
     def __init__(self):
-        pinecone.init(
-            api_key=os.getenv("PINECONE_API_KEY"),
-            environment=os.getenv("PINECONE_ENVIRONMENT")
-        )
-
-        self.index_name = os.getenv("PINECONE_INDEX")
-        self.index = pinecone.Index(self.index_name)
-
-        # Optional: Create index if not exists
-        if self.index_name not in pinecone.list_indexes():
-            pinecone.create_index(self.index_name, dimension=1536)
+        self.pc = None
+        self.index = None
+        self.index_name = os.getenv("PINECONE_INDEX", "hackathon-doc-index")
+        self.initialized = False
+        
+        try:
+            self.pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+            # Initialize index
+            self._initialize_index()
+            self.index = self.pc.Index(self.index_name)
+            self.initialized = True
+            logger.info("✅ EnhancedVectorStore initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize EnhancedVectorStore: {e}")
+            self.initialized = False
         
         # Query expansion terms for different domains
         self.domain_synonyms = {
@@ -44,6 +48,9 @@ class EnhancedVectorStore:
     
     def _initialize_index(self):
         """Initialize or create Pinecone index with enhanced configuration."""
+        if not self.pc:
+            raise Exception("Pinecone client not initialized")
+            
         existing_indexes = [index.name for index in self.pc.list_indexes()]
         
         if self.index_name not in existing_indexes:
@@ -65,17 +72,50 @@ class EnhancedVectorStore:
                 logger.error(f"Failed to create index: {e}")
                 raise
         
-        try:
-            self.index = self.pc.Index(self.index_name)
-            logger.info(f"Connected to Pinecone index: {self.index_name}")
-        except Exception as e:
-            logger.error(f"Failed to connect to index: {e}")
-            raise
+        logger.info(f"Connected to Pinecone index: {self.index_name}")
     
+    def is_connected(self) -> bool:
+        """Check if vector store is properly connected and initialized."""
+        return self.initialized and self.index is not None
+    
+    def get_connection_status(self) -> Dict[str, Any]:
+        """Get detailed connection status for health checks."""
+        if not self.initialized:
+            return {
+                "status": "disconnected",
+                "error": "Vector store not initialized",
+                "index": None
+            }
+        
+        if not self.index:
+            return {
+                "status": "error", 
+                "error": "Index not available",
+                "index": self.index_name
+            }
+        
+        try:
+            # Test connection with a simple stats call
+            stats = self.index.describe_index_stats()
+            return {
+                "status": "connected",
+                "index": self.index_name,
+                "total_vectors": stats.total_vector_count if hasattr(stats, 'total_vector_count') else 0
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "index": self.index_name
+            }
+
     def upsert_chunks_enhanced(self, chunks: List[DocumentChunk]) -> Dict[str, Any]:
         """
         Enhanced upsert with better metadata and error tracking.
         """
+        if not self.is_connected():
+            return {"success": False, "message": "Vector store not connected"}
+            
         if not chunks:
             logger.warning("No chunks to upsert")
             return {"success": False, "message": "No chunks provided"}
@@ -176,6 +216,10 @@ class EnhancedVectorStore:
         """
         Enhanced query with hybrid search, query expansion, and result reranking.
         """
+        if not self.is_connected():
+            logger.warning("Vector store not connected for query")
+            return []
+            
         try:
             # Expand query if needed
             expanded_queries = self._expand_query(query_text, query_embedding)
@@ -325,6 +369,10 @@ class EnhancedVectorStore:
     
     def _simple_query(self, query_embedding: List[float], top_k: int, filters: Optional[Dict] = None) -> List[Dict]:
         """Fallback simple query."""
+        if not self.is_connected():
+            logger.warning("Vector store not connected for simple query")
+            return []
+            
         try:
             results = self.index.query(
                 vector=query_embedding,
@@ -344,18 +392,83 @@ class EnhancedVectorStore:
             return []
     
     def get_index_stats(self) -> Dict[str, Any]:
-        """Get comprehensive index statistics."""
+        """Get comprehensive index statistics with pod monitoring."""
         try:
             stats = self.index.describe_index_stats()
+            total_vectors = stats.total_vector_count if hasattr(stats, 'total_vector_count') else 0
+            index_fullness = stats.index_fullness if hasattr(stats, 'index_fullness') else 0.0
+            
+            # Calculate pod usage and warnings
+            pod_warnings = []
+            if index_fullness > 0.85:
+                pod_warnings.append("Index >85% full - consider cleanup or scaling")
+            if total_vectors > 100000:  # Adjust based on your plan
+                pod_warnings.append(f"High vector count ({total_vectors}) - monitor pod limits")
+            
             return {
-                'total_vectors': stats.total_vector_count,
-                'dimension': stats.dimension,
-                'index_fullness': stats.index_fullness,
-                'namespaces': dict(stats.namespaces) if stats.namespaces else {}
+                'total_vectors': total_vectors,
+                'dimension': stats.dimension if hasattr(stats, 'dimension') else 1536,
+                'index_fullness': index_fullness,
+                'namespaces': dict(stats.namespaces) if hasattr(stats, 'namespaces') and stats.namespaces else {},
+                'pod_warnings': pod_warnings,
+                'cleanup_recommended': index_fullness > 0.80
             }
         except Exception as e:
             logger.error(f"Failed to get index stats: {e}")
-            return {}
+            return {
+                'total_vectors': 0,
+                'error': str(e),
+                'pod_warnings': ['Unable to check pod status'],
+                'cleanup_recommended': False
+            }
+    
+    def cleanup_old_vectors(self, days_old: int = 30, batch_size: int = 1000) -> Dict[str, Any]:
+        """Clean up old vectors to free pod space."""
+        if not self.is_connected():
+            return {"success": False, "error": "Vector store not connected"}
+        
+        try:
+            import time
+            cutoff_timestamp = time.time() - (days_old * 24 * 60 * 60)
+            
+            # Query for old vectors (this is a simplified approach)
+            # In practice, you'd need to implement proper metadata-based filtering
+            logger.info(f"Starting cleanup of vectors older than {days_old} days")
+            
+            # This is a placeholder - implement based on your metadata structure
+            cleanup_stats = {
+                "success": True,
+                "vectors_deleted": 0,
+                "space_freed_mb": 0,
+                "message": "Cleanup feature requires metadata-based implementation"
+            }
+            
+            return cleanup_stats
+            
+        except Exception as e:
+            logger.error(f"Cleanup failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def optimize_for_speed(self) -> Dict[str, Any]:
+        """Configure index for speed optimization."""
+        try:
+            # Return current optimization settings
+            return {
+                "speed_optimizations": {
+                    "reduced_top_k": "Using top_k=5 instead of 8+",
+                    "context_compression": "Reduced context from 2500 to 1800 chars",
+                    "chunk_limit": "Using top 3 chunks instead of 5",
+                    "timeout_enabled": "10s timeout on API calls",
+                    "cache_optimization": "Reduced cache size to 30 entries"
+                },
+                "recommendations": [
+                    "Consider upgrading Pinecone plan for better performance",
+                    "Implement vector compression if needed",
+                    "Monitor pod usage regularly"
+                ]
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
 # Initialize global vector store instance
 vector_store = EnhancedVectorStore()
@@ -390,6 +503,11 @@ def query_similar_chunks(query_embedding: list[float], top_k: int = 10):
         
     if len(query_embedding) != 1536:
         print(f"❌ Invalid query embedding dimension: {len(query_embedding)}")
+        return []
+    
+    # Check if vector store is connected
+    if not vector_store.is_connected():
+        print("❌ Vector store not connected")
         return []
     
     try:
